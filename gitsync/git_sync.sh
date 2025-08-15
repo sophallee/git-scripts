@@ -198,26 +198,26 @@ sync_repository() {
     log "INFO" "syncing to: $target_repo"
     log "INFO" "using temp dir: $temp_dir"
 
-    # Validate repositories
+    # Validate source repository
     if [ ! -d "$source_repo/.git" ]; then
         log "ERROR" "source repository $source_repo is not a valid git repository"
         return 1
     fi
 
+    # Handle target repository initialization if needed
     if [ ! -d "$target_repo/.git" ]; then
-        log "ERROR" "target repository $target_repo is not a valid git repository"
-        return 1
+        log "INFO" "initializing empty target repository"
+        mkdir -p "$target_repo"
+        (cd "$target_repo" && git init --initial-branch=main >> "$log_file" 2>&1) || {
+            log "ERROR" "failed to initialize target repository"
+            return 1
+        }
     fi
 
-    # Update repositories
-    log "INFO" "updating repositories..."
+    # Update source repository
+    log "INFO" "updating source repository..."
     (cd "$source_repo" && git pull >> "$log_file" 2>&1) || {
-        log "ERROR" "failed to update source repository $source_repo"
-        return 1
-    }
-    (cd "$target_repo" && git pull >> "$log_file" 2>&1) || {
-        log "ERROR" "failed to update target repository $target_repo"
-        return 1
+        log "WARNING" "source repository pull failed, continuing with local commits"
     }
 
     # Get all source commits
@@ -280,14 +280,28 @@ sync_repository() {
     log "INFO" "sync complete for $source_repo_name: processed $processed commits, skipped $skipped"
 
     # Auto-push if enabled
-    if [ "$auto_push" = "true" ]; then
+    if [ "$auto_push" = "true" ] && [ "$processed" -gt 0 ]; then
         log "INFO" "pushing changes to target repository..."
-        if (cd "$target_repo" && git push >> "$log_file" 2>&1); then
-            log "INFO" "successfully pushed changes to target repository"
-        else
-            log "ERROR" "failed to push changes to target repository"
-            return 1
-        fi
+        (cd "$target_repo" && {
+            # Ensure we're on the main branch
+            git checkout main >> "$log_file" 2>&1
+            
+            # Push with --set-upstream
+            if git push --set-upstream origin main >> "$log_file" 2>&1; then
+                log "INFO" "successfully pushed changes to target repository and set upstream"
+            else
+                # If push fails because remote doesn't exist, create it first
+                if ! git remote get-url origin >> "$log_file" 2>&1; then
+                    log "ERROR" "no remote 'origin' configured for target repository"
+                    return 1
+                else
+                    log "ERROR" "failed to push changes to target repository"
+                    return 1
+                fi
+            fi
+        })
+    elif [ "$auto_push" = "true" ] && [ "$processed" -eq 0 ]; then
+        log "INFO" "no new commits to push"
     else
         log "INFO" "auto-push is disabled, changes not pushed to remote"
     fi
