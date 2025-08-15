@@ -1,0 +1,43 @@
+title = "Enhanced Gitleaks Configuration"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "custom-rule-bash-password"
+description = "Detects hardcoded password assignments in Bash scripts"
+regex = '''(?i)\b(?:password|passwd|pwd|pass|secret|creds|credentials|mysql_pwd|mysql_pass|db_pass|db_password|app_pass|app_passwd|api_pass|api_passwd)\b\s*=\s*(?:["'][^"']{6,}["']|[^ \t\r\n"']{6,})'''
+entropy = 3.0
+keywords = ["password", "passwd", "pwd", "pass", "secret", "creds", "credentials"]
+
+[[rules]]
+id = "custom-rule-key-assignment"
+description = "Detects hardcoded key assignments"
+regex = '''(?i)\b(?:key|api_key|secret_key|private_key|access_key|auth_key|encryption_key|pgp_key|ssh_key|aws_key|gcp_key|azure_key)\b\s*=\s*(?:["'][^"']{20,}["']|[^ \t\r\n"']{20,})'''
+entropy = 2.5
+keywords = ["key", "api_key", "secret_key", "private_key"]
+
+[[rules]]
+id = "custom-rule-connection-strings"
+description = "Detects connection strings with credentials"
+regex = '''(?i)(?:jdbc|postgresql|mysql|mongodb)://[^:]+:[^@]+@'''
+entropy = 4.0
+
+[[rules]]
+id = "custom-rule-bearer-tokens"
+description = "Detects bearer tokens in code"
+regex = '''(?i)bearer\s+[a-z0-9\-_]{20,}'''
+entropy = 3.8
+
+[[rules]]
+id = "custom-rule-generic-secret"
+description = "Catches generic secret patterns"
+regex = '''(?i)\b(?:secret|token|auth|authentication|credential)\b\s*=\s*(?:["'][^"']{8,}["']|[^ \t\r\n"']{8,})'''
+entropy = 3.2
+keywords = ["secret", "token", "auth", "authentication"]
+
+[[rules]]
+id = "custom-rule-short-secrets"
+description = "Catches short but sensitive values"
+regex = '''(?i)\b(?:pin|passcode)\b\s*=\s*(?:["'][^"']{3,}["']|[^ \t\r\n"']{3,})'''
+entropy = 2.5
