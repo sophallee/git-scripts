@@ -1,19 +1,17 @@
-Here’s full **Markdown documentation** for `env.template` and `git_sync.sh` based exactly on your script’s logic.
-
----
-
-# Git Repository Sync with Commit Mapping
+# Git Repository Sync with Commit Mapping (v2.1)
 
 ## Overview
 
-The `git_sync.sh` script synchronizes commits between two Git repositories while recording a mapping of **source commit hashes** to **target commit hashes** in a local SQLite database.
-It is designed to:
+`git_sync.sh` synchronizes commits between **source** and **target** Git repositories while recording a mapping of **source commit hashes** to **target commit hashes** in a local SQLite database.
 
-* Avoid duplicating commits that are already synced.
-* Preserve commit metadata (message, author, date).
-* Handle **initial commits** differently from normal commits.
-* Optionally skip repositories.
-* Provide a quick list of available repositories for syncing.
+Key features:
+
+* Avoids duplicating commits already synced.
+* Preserves commit metadata (message, author, date).
+* Handles **initial commits** differently from normal commits.
+* Supports repository exclusion.
+* Optionally pushes changes automatically to the target repository.
+* Provides detailed logging with configurable levels.
 
 ---
 
@@ -30,18 +28,21 @@ Environment variable template for `.env` configuration.
 | `excluded_repos`  | Space-separated list of repository names to exclude from syncing      | *(empty)*                                 |
 | `db_file`         | Path to SQLite database file for commit mapping                       | `git-sync-mapping.db` in script directory |
 | `auto_push`       | Automatically push to target repository after sync (`true` / `false`) | `true`                                    |
+| `log_dir`         | Directory to store log files                                          | `/var/log/gitsync`                        |
+| `max_log_files`   | Maximum number of old log files to keep                               | `30`                                      |
+| `log_level`       | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`)                   | `INFO`                                    |
 
 ---
 
 ### 2. `git_sync.sh`
 
-Main script that:
+Main script functionality:
 
-1. Loads `.env` (if present).
-2. Sets default values for missing variables.
-3. Initializes SQLite database schema.
-4. Lists available repositories if no arguments are passed.
-5. Syncs commits from a **source** repository to a **target** repository.
+1. Loads `.env` (if present) and sets default values.
+2. Initializes SQLite database schema.
+3. Lists available repositories if no arguments are passed.
+4. Synchronizes commits from a **source** repository to a **target** repository.
+5. Handles auto-push if enabled.
 
 ---
 
@@ -69,42 +70,52 @@ Indexes:
 
 ## Key Functions
 
+### **init\_logging**
+
+* Creates log directory (`log_dir`) or falls back to `script_dir/logs`.
+* Rotates old logs based on `max_log_files`.
+* Logs messages to timestamped files with levels: `DEBUG`, `INFO`, `WARNING`, `ERROR`.
+
 ### **init\_db**
 
-Initializes the SQLite database and creates necessary tables/indexes.
+* Creates SQLite database and `commit_mapping` table if it doesn't exist.
+* Adds indexes for faster queries.
 
 ### **is\_commit\_synced**
 
-Checks if a specific commit from the source repo has already been synced.
+* Checks if a commit hash from the source repo is already in the database.
 
 ### **record\_commit\_mapping**
 
-Adds a commit mapping record to the database.
+* Records a new commit mapping with metadata in the SQLite database.
 
 ### **get\_commit\_metadata**
 
-Retrieves commit hash, author name, author email, commit date, and commit message for a given commit.
+* Retrieves commit hash, author, date, and message for a given commit.
 
 ### **get\_repo\_commits**
 
-Lists all commit hashes in chronological order.
+* Lists all commit hashes in chronological order for the source repository.
 
-### **list\_available\_repos**
+### **list\_and\_sync\_all\_repos**
 
-Prints all available repositories in the `base_dir_source`, excluding those in `excluded_repos`.
+* Iterates over all repositories in `base_dir_source`.
+* Skips excluded repositories.
+* Calls `sync_repository` for each valid repository.
+* Provides a summary of processed, synced, and skipped repositories.
 
 ### **sync\_repository**
 
-Main sync logic:
+* Validates source and target repositories.
+* Pulls latest changes from both repositories.
+* Loops through all commits in the source repository:
 
-1. Validates input repositories.
-2. Pulls latest changes from both source and target.
-3. Iterates over commits in the source repo.
-4. Skips commits already synced.
-5. Generates patch files (`git format-patch`).
-6. Applies patches to the target repo (`git am`).
-7. Records mapping in database.
-8. Cleans up temporary files.
+  * Skips commits already synced.
+  * Creates patch files using `git format-patch`.
+  * Applies patches to target repository using `git am --committer-date-is-author-date`.
+  * Records commit mappings in the SQLite database.
+* Cleans up temporary files.
+* Auto-pushes changes if `auto_push=true`.
 
 ---
 
@@ -127,6 +138,9 @@ base_dir_dest="/home/user/projects/dest"
 excluded_repos="test-repo old-repo"
 db_file="/home/user/git-sync/git-sync-mapping.db"
 auto_push=true
+log_dir="/var/log/gitsync"
+max_log_files=30
+log_level=DEBUG
 ```
 
 ---
@@ -137,17 +151,13 @@ auto_push=true
 ./git_sync.sh
 ```
 
-Example output:
+Output example:
 
 ```
 Available repositories in /home/user/projects/source:
 ----------------------------------------
 - repo1
 - repo2
-
-To sync a repository:
-  ./git_sync.sh <repository_name> [target_repository_name]
-
 Excluded repositories: test-repo old-repo
 ```
 
@@ -169,7 +179,7 @@ Excluded repositories: test-repo old-repo
 
 ---
 
-### 4. Verify sync
+### 4. Verify synced commits
 
 Check the database:
 
@@ -179,34 +189,26 @@ sqlite3 git-sync-mapping.db "SELECT * FROM commit_mapping LIMIT 5;"
 
 ---
 
-## Example Flow
+### 5. Logging
 
-1. You have:
+* Logs are stored in `log_dir` with timestamped filenames.
+* Controlled by `log_level`.
+* Example levels:
 
-   * `/src/repo1` (source)
-   * `/mirror/repo1` (target)
-2. Run:
-
-   ```bash
-   ./git_sync.sh repo1
-   ```
-3. Script:
-
-   * Updates both repos with `git pull`.
-   * Loops through each commit in `repo1`.
-   * Skips commits already in `git-sync-mapping.db`.
-   * Creates patches and applies them to `repo1` in the target directory.
-   * Records commit mappings.
-4. Push target repo (if `auto_push=true`, script can be extended to do this automatically).
+  * `DEBUG` – detailed internal information
+  * `INFO` – normal operational messages
+  * `WARNING` – non-fatal issues
+  * `ERROR` – fatal or failed operations
 
 ---
 
 ## Notes
 
-* Requires **SQLite** and **Git** installed.
-* Only commits not already in mapping DB will be synced.
-* If a patch fails, the script aborts with `git am --abort`.
-* Initial commits are handled with `--root` patches.
-* `excluded_repos` prevents syncing certain repositories.
+* Requires **Git** and **SQLite3** installed.
+* Commits are skipped if already recorded in the mapping database.
+* Handles initial commits (`--root`) separately.
+* Auto-push can be disabled by setting `auto_push=false`.
+* Repository exclusion prevents syncing specific repositories.
+* Temporary patch files are cleaned after each repository sync.
 
 ---
