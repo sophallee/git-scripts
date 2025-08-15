@@ -6,14 +6,33 @@
 # ------------------------------------------------------------------------------
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Logging configuration
+log_dir="/var/log/gitsync"
+log_file="$log_dir/gitsync.log"
+mkdir -p "$log_dir"
+touch "$log_file"
+
+# Function to log messages
+log() {
+    local level=$1
+    local message=$2
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $message" >> "$log_file"
+    if [ "$level" == "ERROR" ]; then
+        echo "$message" >&2
+    elif [ "$level" != "DEBUG" ]; then
+        echo "$message"
+    fi
+}
+
 # Load .env file if exists
 if [ -f "$script_dir/.env" ]; then
     set -a
-    source "$script_dir/.env" || { echo "Error: Failed to load .env file" >&2; exit 1; }
+    source "$script_dir/.env" || { log "ERROR" "failed to load .env file"; exit 1; }
     set +a
 fi
 
-# Set default values
+# Set default values (environment variables remain uppercase)
+# Set default values (all lowercase, only HOME is environment variable)
 base_dir_source="${base_dir_source:-$HOME/development}"
 base_dir_dest="${base_dir_dest:-$HOME/development}"
 excluded_repos="${excluded_repos:-}"
@@ -22,64 +41,11 @@ auto_push="${auto_push:-true}"  # Default to auto-push
 log_dir="${log_dir:-/var/log/gitsync}"
 max_log_files="${max_log_files:-30}"  # Number of old log files to keep
 log_level="${log_level:-INFO}"  # DEBUG, INFO, WARNING, ERROR
-
- Logging Implementation
-# ------------------------------------------------------------------------------
-
-init_logging() {
-    # Create log directory if it doesn't exist
-    sudo mkdir -p "$log_dir" 2>/dev/null || {
-        echo "Warning: Failed to create log directory $log_dir, falling back to $script_dir/logs" >&2
-        log_dir="$script_dir/logs"
-        mkdir -p "$log_dir"
-    }
-
-    # Set appropriate permissions
-    sudo chown "$(whoami)" "$log_dir" 2>/dev/null || true
-    chmod 755 "$log_dir"
-
-    log_file="$log_dir/gitsync_$(date +%Y%m%d_%H%M%S).log"
-    touch "$log_file"
-    chmod 644 "$log_file"
-
-    # Rotate old logs
-    find "$log_dir" -name "gitsync_*.log" -type f | sort -r | tail -n +$((max_log_files + 1)) | xargs rm -f 2>/dev/null
-}
-
-log() {
-    local level=$1
-    local message=$2
-    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
-
-    # Check if the message's level is at or above the configured log level
-    case $log_level in
-        DEBUG) ;;
-        INFO) [[ $level == "DEBUG" ]] && return ;;
-        WARNING) [[ $level == "DEBUG" || $level == "INFO" ]] && return ;;
-        ERROR) [[ $level != "ERROR" ]] && return ;;
-    esac
-
-    echo "[$timestamp] [$level] $message" | tee -a "$log_file"
-}
-
-# Initialize logging
-init_logging
-
-log "INFO" "Starting git-sync script"
-log "DEBUG" "Script directory: $script_dir"
-log "DEBUG" "Configuration loaded:"
-log "DEBUG" "  base_dir_source: $base_dir_source"
-log "DEBUG" "  base_dir_dest: $base_dir_dest"
-log "DEBUG" "  excluded_repos: $excluded_repos"
-log "DEBUG" "  auto_push: $auto_push"
-log "DEBUG" "  log_dir: $log_dir"
-log "DEBUG" "  log_level: $log_level"
-
 # Initialize SQLite Database
 # ------------------------------------------------------------------------------
 
 init_db() {
-    log "DEBUG" "Initializing database at $db_file"
+    log "INFO" "initializing database at $db_file"
     sqlite3 "$db_file" <<EOF
     CREATE TABLE IF NOT EXISTS commit_mapping (
         source_repo    TEXT NOT NULL,
@@ -95,7 +61,11 @@ init_db() {
     CREATE INDEX IF NOT EXISTS idx_target ON commit_mapping(target_repo, target_hash);
     CREATE INDEX IF NOT EXISTS idx_source ON commit_mapping(source_repo, source_hash);
 EOF
-    log "DEBUG" "Database initialized"
+    if [ $? -ne 0 ]; then
+        log "ERROR" "failed to initialize database"
+        return 1
+    fi
+    log "INFO" "database initialized successfully"
 }
 
 # Database Functions
@@ -122,7 +92,6 @@ record_commit_mapping() {
     message=${message//\'/''}
     author=${author//\'/''}
 
-    log "DEBUG" "Recording commit mapping: $source_repo:$source_hash -> $target_repo:$target_hash"
     sqlite3 "$db_file" <<EOF
     INSERT INTO commit_mapping (
         source_repo, target_repo, 
@@ -134,6 +103,11 @@ record_commit_mapping() {
         '$message', '$author', '$date'
     );
 EOF
+    if [ $? -ne 0 ]; then
+        log "ERROR" "failed to record commit mapping for $source_hash"
+        return 1
+    fi
+    log "INFO" "recorded commit mapping: $source_hash -> $target_hash"
 }
 
 # Git Helper Functions
@@ -156,8 +130,8 @@ get_repo_commits() {
 # ------------------------------------------------------------------------------
 
 list_and_sync_all_repos() {
-    log "INFO" "Starting sync of all repositories in $base_dir_source"
-    log "INFO" "Excluded repositories: ${excluded_repos}"
+    log "INFO" "starting sync of all repositories in $base_dir_source"
+    log "INFO" "excluded repositories: ${excluded_repos}"
     
     IFS=' ' read -ra excluded <<< "$excluded_repos"
     found=0
@@ -178,28 +152,26 @@ list_and_sync_all_repos() {
             done
             
             if [ "$should_skip" -eq 1 ]; then
-                log "INFO" "Skipping excluded repository: $repo_name"
+                log "INFO" "skipping excluded repository: $repo_name"
                 skipped=$((skipped + 1))
                 continue
             fi
             
-            log "INFO" "Syncing repository: $repo_name"
+            log "INFO" "syncing repository: $repo_name"
             if sync_repository "$repo_name"; then
-                log "INFO" "Successfully synced: $repo_name"
                 synced=$((synced + 1))
+                log "INFO" "successfully synced: $repo_name"
             else
-                log "ERROR" "Failed to sync: $repo_name"
+                log "ERROR" "failed to sync: $repo_name"
             fi
             found=$((found + 1))
         fi
     done
     
-    log "INFO" "Sync summary: Found $found repositories, Synced repository: $synced, Skipped commits: $skipped"
-    echo ""
-    echo "Sync completed. Details logged to $log_file"
-    echo "Found repositories: $found"
-    echo "Successfully synced: $synced"
-    echo "Skipped (excluded): $skipped"
+    log "INFO" "sync summary: found $found repositories, successfully synced $synced, skipped $skipped"
+    if [ "$found" -eq 0 ]; then
+        log "WARNING" "no repositories found in $base_dir_source"
+    fi
 }
 
 # Main Sync Function
@@ -209,13 +181,11 @@ sync_repository() {
     local source_repo_name=$1
     local target_repo_name=${2:-$source_repo_name}
 
-    log "INFO" "Starting sync for repository: $source_repo_name -> $target_repo_name"
-
     # Check if source repo is excluded
     IFS=' ' read -ra excluded <<< "$excluded_repos"
     for excluded_repo in "${excluded[@]}"; do
         if [ "$source_repo_name" == "$excluded_repo" ]; then
-            log "ERROR" "Repository '$source_repo_name' is excluded from syncing"
+            log "ERROR" "repository '$source_repo_name' is excluded from syncing"
             return 1
         fi
     done
@@ -224,34 +194,34 @@ sync_repository() {
     local target_repo="$base_dir_dest/$target_repo_name"
     local temp_dir=$(mktemp -d -t git-sync-XXXXXX)
 
-    log "DEBUG" "Source repo path: $source_repo"
-    log "DEBUG" "Target repo path: $target_repo"
-    log "DEBUG" "Temp dir: $temp_dir"
+    log "INFO" "syncing from: $source_repo"
+    log "INFO" "syncing to: $target_repo"
+    log "INFO" "using temp dir: $temp_dir"
 
     # Validate repositories
     if [ ! -d "$source_repo/.git" ]; then
-        log "ERROR" "Source repository $source_repo is not a valid Git repository"
+        log "ERROR" "source repository $source_repo is not a valid git repository"
         return 1
     fi
 
     if [ ! -d "$target_repo/.git" ]; then
-        log "ERROR" "Target repository $target_repo is not a valid Git repository"
+        log "ERROR" "target repository $target_repo is not a valid git repository"
         return 1
     fi
 
     # Update repositories
-    log "INFO" "Updating repositories..."
-    (cd "$source_repo" && git pull) || {
-        log "ERROR" "Failed to pull source repository $source_repo"
+    log "INFO" "updating repositories..."
+    (cd "$source_repo" && git pull >> "$log_file" 2>&1) || {
+        log "ERROR" "failed to update source repository $source_repo"
         return 1
     }
-    (cd "$target_repo" && git pull) || {
-        log "ERROR" "Failed to pull target repository $target_repo"
+    (cd "$target_repo" && git pull >> "$log_file" 2>&1) || {
+        log "ERROR" "failed to update target repository $target_repo"
         return 1
     }
 
     # Get all source commits
-    log "INFO" "Analyzing commit history..."
+    log "INFO" "analyzing commit history..."
     mapfile -t source_commits < <(get_repo_commits "$source_repo")
 
     processed=0
@@ -260,12 +230,12 @@ sync_repository() {
     for source_commit in "${source_commits[@]}"; do
         # Skip if already synced
         if [ "$(is_commit_synced "$source_repo" "$source_commit")" -gt 0 ]; then
-            log "DEBUG" "Commit already synced: ${source_commit:0:7}"
+            log "INFO" "already synced: ${source_commit:0:7}"
             skipped=$((skipped + 1))
             continue
         fi
 
-        log "INFO" "Processing commit: ${source_commit:0:7}"
+        log "INFO" "processing commit: ${source_commit:0:7}"
         
         # Get commit metadata
         mapfile -t metadata < <(get_commit_metadata "$source_repo" "$source_commit")
@@ -273,25 +243,19 @@ sync_repository() {
         date="${metadata[3]}"
         message="${metadata[*]:4}"
         
-        # Create patch file
+        # Create patch file - handle initial commit differently
         if (cd "$source_repo" && git rev-list --count "$source_commit" 2>/dev/null) | grep -q '^1$'; then
-            log "DEBUG" "Processing initial commit"
+            # This is the initial commit
             (cd "$source_repo" && \
-             git format-patch --root --stdout "$source_commit" > "$temp_dir/$source_commit.patch") || {
-                log "ERROR" "Failed to create patch for initial commit ${source_commit:0:7}"
-                return 1
-            }
+             git format-patch --root --stdout "$source_commit" > "$temp_dir/$source_commit.patch")
         else
-            log "DEBUG" "Processing normal commit"
+            # Normal commit with parent
             (cd "$source_repo" && \
-             git format-patch --stdout "$source_commit^..$source_commit" > "$temp_dir/$source_commit.patch") || {
-                log "ERROR" "Failed to create patch for commit ${source_commit:0:7}"
-                return 1
-            }
+             git format-patch --stdout "$source_commit^..$source_commit" > "$temp_dir/$source_commit.patch")
         fi
         
         # Apply patch to target
-        if (cd "$target_repo" && git am --committer-date-is-author-date "$temp_dir/$source_commit.patch"); then
+        if (cd "$target_repo" && git am --committer-date-is-author-date "$temp_dir/$source_commit.patch" >> "$log_file" 2>&1); then
             # Get new commit hash
             target_commit=$(cd "$target_repo" && git rev-parse HEAD)
             
@@ -301,11 +265,11 @@ sync_repository() {
                 "$source_commit" "$target_commit" \
                 "$message" "$author" "$date"
             
-            log "INFO" "Successfully applied commit ${source_commit:0:7} -> ${target_commit:0:7}"
             processed=$((processed + 1))
+            log "INFO" "successfully processed commit ${source_commit:0:7} -> ${target_commit:0:7}"
         else
-            log "ERROR" "Failed to apply patch for commit ${source_commit:0:7}"
-            (cd "$target_repo" && git am --abort)
+            log "ERROR" "failed to apply patch for ${source_commit:0:7}"
+            (cd "$target_repo" && git am --abort >> "$log_file" 2>&1)
             return 1
         fi
     done
@@ -313,19 +277,19 @@ sync_repository() {
     # Clean up
     rm -rf "$temp_dir"
 
-    log "INFO" "Sync complete for $source_repo_name: Processed $processed commits, Skipped $skipped commits"
+    log "INFO" "sync complete for $source_repo_name: processed $processed commits, skipped $skipped"
 
     # Auto-push if enabled
     if [ "$auto_push" = "true" ]; then
-        log "INFO" "Pushing changes to target repository..."
-        if (cd "$target_repo" && git push); then
-            log "INFO" "Successfully pushed changes to target repository"
+        log "INFO" "pushing changes to target repository..."
+        if (cd "$target_repo" && git push >> "$log_file" 2>&1); then
+            log "INFO" "successfully pushed changes to target repository"
         else
-            log "ERROR" "Failed to push changes to target repository"
+            log "ERROR" "failed to push changes to target repository"
             return 1
         fi
     else
-        log "INFO" "Auto-push is disabled - changes not pushed"
+        log "INFO" "auto-push is disabled, changes not pushed to remote"
     fi
     
     return 0
@@ -334,16 +298,32 @@ sync_repository() {
 # Main Execution
 # ------------------------------------------------------------------------------
 
+# Set up log rotation configuration
+if [ ! -f "/etc/logrotate.d/gitsync" ]; then
+    log "INFO" "creating logrotate configuration for gitsync"
+    sudo tee "/etc/logrotate.d/gitsync" > /dev/null <<EOF
+$log_file {
+    daily
+    missingok
+    rotate 30
+    compress
+    delaycompress
+    notifempty
+    create 0640 root adm
+}
+EOF
+fi
+
 init_db
 
 # Validate base directories
 if [ ! -d "$base_dir_source" ]; then
-    log "ERROR" "Source base directory not found: $base_dir_source"
+    log "ERROR" "source base directory not found: $base_dir_source"
     exit 1
 fi
 
 if [ ! -d "$base_dir_dest" ]; then
-    log "ERROR" "Destination base directory not found: $base_dir_dest"
+    log "ERROR" "destination base directory not found: $base_dir_dest"
     exit 1
 fi
 
@@ -355,4 +335,3 @@ fi
 
 # Start sync for specific repository
 sync_repository "$1" "$2"
-exit $?
